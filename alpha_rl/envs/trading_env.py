@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Tuple, Any
 class MultiAssetTradingEnv(gym.Env):
     """
     Gymnasium multi-asset continuous portfolio allocation environment.
-    Action: target portfolio weights across N assets (long-only simplex).
+    Includes tiered transaction fees and Kyle's lambda linear market impact model.
     """
     metadata = {"render_modes": ["human"]}
 
@@ -17,7 +17,9 @@ class MultiAssetTradingEnv(gym.Env):
         feature_data: Dict[str, pd.DataFrame],
         initial_balance: float = 100_000.0,
         window_size: int = 20,
-        fee_rate: float = 0.0005,
+        maker_fee: float = 0.0002,
+        taker_fee: float = 0.0005,
+        slippage_lambda: float = 1e-7,
     ):
         super().__init__()
         self.assets = sorted(list(market_data.keys()))
@@ -26,15 +28,14 @@ class MultiAssetTradingEnv(gym.Env):
         self.feature_data = feature_data
         self.initial_balance = initial_balance
         self.window_size = window_size
-        self.fee_rate = fee_rate
+        self.maker_fee = maker_fee
+        self.taker_fee = taker_fee
+        self.slippage_lambda = slippage_lambda
 
         self.n_features = feature_data[self.assets[0]].shape[1]
         self.n_bars = len(market_data[self.assets[0]])
 
-        # Action: target weights for assets (cash is remainder)
         self.action_space = spaces.Box(low=0.0, high=1.0, shape=(self.n_assets,), dtype=np.float32)
-
-        # Obs: window of features + current weights + cash ratio
         obs_dim = (self.window_size * self.n_assets * self.n_features) + self.n_assets + 1
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32)
 
@@ -56,6 +57,9 @@ class MultiAssetTradingEnv(gym.Env):
     def _get_prices(self, step: int) -> np.ndarray:
         return np.array([self.market_data[a]["close"].iloc[step] for a in self.assets], dtype=np.float64)
 
+    def _get_volumes(self, step: int) -> np.ndarray:
+        return np.array([self.market_data[a]["volume"].iloc[step] for a in self.assets], dtype=np.float64)
+
     def _get_observation(self) -> np.ndarray:
         obs_list = []
         for a in self.assets:
@@ -69,8 +73,8 @@ class MultiAssetTradingEnv(gym.Env):
 
     def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, dict]:
         prices = self._get_prices(self.current_step)
+        volumes = self._get_volumes(self.current_step)
         
-        # Normalize action to simplex
         action = np.clip(action, 0.0, 1.0)
         total_weight = np.sum(action)
         if total_weight > 1.0:
@@ -79,12 +83,14 @@ class MultiAssetTradingEnv(gym.Env):
         target_values = action * self.portfolio_value
         target_holdings = target_values / prices
         delta_holdings = target_holdings - self.holdings
+        trade_sizes = np.abs(delta_holdings) * prices
 
-        turnover = np.sum(np.abs(delta_holdings) * prices)
-        fee = turnover * self.fee_rate
+        # Kyle's lambda market impact model
+        slippage_cost = np.sum(self.slippage_lambda * (trade_sizes ** 2) / (volumes + 1e-6))
+        fee = np.sum(trade_sizes * self.taker_fee)
 
         self.holdings = target_holdings
-        self.cash = self.portfolio_value - np.sum(self.holdings * prices) - fee
+        self.cash = self.portfolio_value - np.sum(self.holdings * prices) - fee - slippage_cost
 
         self.current_step += 1
         terminated = self.current_step >= self.n_bars - 1
@@ -99,6 +105,7 @@ class MultiAssetTradingEnv(gym.Env):
 
         return self._get_observation(), reward, terminated, truncated, {
             "portfolio_value": self.portfolio_value,
-            "turnover": turnover,
-            "fee": fee
+            "turnover": np.sum(trade_sizes),
+            "fee": fee,
+            "slippage": slippage_cost
         }
