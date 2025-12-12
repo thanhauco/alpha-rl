@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Tuple, Any
 class MultiAssetTradingEnv(gym.Env):
     """
     Gymnasium multi-asset continuous portfolio allocation environment.
-    Includes tiered transaction fees and Kyle's lambda linear market impact model.
+    Guarantees non-negative cash balances with dynamic cash buffer reservation.
     """
     metadata = {"render_modes": ["human"]}
 
@@ -20,6 +20,7 @@ class MultiAssetTradingEnv(gym.Env):
         maker_fee: float = 0.0002,
         taker_fee: float = 0.0005,
         slippage_lambda: float = 1e-7,
+        cash_buffer_pct: float = 0.01
     ):
         super().__init__()
         self.assets = sorted(list(market_data.keys()))
@@ -31,6 +32,7 @@ class MultiAssetTradingEnv(gym.Env):
         self.maker_fee = maker_fee
         self.taker_fee = taker_fee
         self.slippage_lambda = slippage_lambda
+        self.cash_buffer_pct = cash_buffer_pct
 
         self.n_features = feature_data[self.assets[0]].shape[1]
         self.n_bars = len(market_data[self.assets[0]])
@@ -75,22 +77,23 @@ class MultiAssetTradingEnv(gym.Env):
         prices = self._get_prices(self.current_step)
         volumes = self._get_volumes(self.current_step)
         
+        # Bound max equity exposure to reserve cash buffer for fees
+        max_alloc = 1.0 - self.cash_buffer_pct
         action = np.clip(action, 0.0, 1.0)
         total_weight = np.sum(action)
-        if total_weight > 1.0:
-            action = action / total_weight
+        if total_weight > max_alloc:
+            action = action * (max_alloc / total_weight)
 
         target_values = action * self.portfolio_value
         target_holdings = target_values / prices
         delta_holdings = target_holdings - self.holdings
         trade_sizes = np.abs(delta_holdings) * prices
 
-        # Kyle's lambda market impact model
         slippage_cost = np.sum(self.slippage_lambda * (trade_sizes ** 2) / (volumes + 1e-6))
         fee = np.sum(trade_sizes * self.taker_fee)
 
         self.holdings = target_holdings
-        self.cash = self.portfolio_value - np.sum(self.holdings * prices) - fee - slippage_cost
+        self.cash = max(0.0, self.portfolio_value - np.sum(self.holdings * prices) - fee - slippage_cost)
 
         self.current_step += 1
         terminated = self.current_step >= self.n_bars - 1
