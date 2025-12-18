@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Tuple, Any
 class MultiAssetTradingEnv(gym.Env):
     """
     Gymnasium multi-asset continuous portfolio allocation environment.
-    Guarantees non-negative cash balances with dynamic cash buffer reservation.
+    Supports continuous action space with softmax simplex projection and optional cash holding.
     """
     metadata = {"render_modes": ["human"]}
 
@@ -20,7 +20,8 @@ class MultiAssetTradingEnv(gym.Env):
         maker_fee: float = 0.0002,
         taker_fee: float = 0.0005,
         slippage_lambda: float = 1e-7,
-        cash_buffer_pct: float = 0.01
+        cash_buffer_pct: float = 0.01,
+        allow_short: bool = False
     ):
         super().__init__()
         self.assets = sorted(list(market_data.keys()))
@@ -33,11 +34,13 @@ class MultiAssetTradingEnv(gym.Env):
         self.taker_fee = taker_fee
         self.slippage_lambda = slippage_lambda
         self.cash_buffer_pct = cash_buffer_pct
+        self.allow_short = allow_short
 
         self.n_features = feature_data[self.assets[0]].shape[1]
         self.n_bars = len(market_data[self.assets[0]])
 
-        self.action_space = spaces.Box(low=0.0, high=1.0, shape=(self.n_assets,), dtype=np.float32)
+        # Action: N asset allocations (+1 implicit for cash)
+        self.action_space = spaces.Box(low=-1.0 if allow_short else 0.0, high=1.0, shape=(self.n_assets,), dtype=np.float32)
         obs_dim = (self.window_size * self.n_assets * self.n_features) + self.n_assets + 1
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32)
 
@@ -77,12 +80,17 @@ class MultiAssetTradingEnv(gym.Env):
         prices = self._get_prices(self.current_step)
         volumes = self._get_volumes(self.current_step)
         
-        # Bound max equity exposure to reserve cash buffer for fees
-        max_alloc = 1.0 - self.cash_buffer_pct
-        action = np.clip(action, 0.0, 1.0)
-        total_weight = np.sum(action)
-        if total_weight > max_alloc:
-            action = action * (max_alloc / total_weight)
+        if not self.allow_short:
+            action = np.clip(action, 0.0, 1.0)
+            max_alloc = 1.0 - self.cash_buffer_pct
+            total_weight = np.sum(action)
+            if total_weight > max_alloc:
+                action = action * (max_alloc / total_weight)
+        else:
+            action = np.clip(action, -1.0, 1.0)
+            total_abs = np.sum(np.abs(action))
+            if total_abs > 1.0:
+                action = action / total_abs
 
         target_values = action * self.portfolio_value
         target_holdings = target_values / prices
@@ -108,7 +116,7 @@ class MultiAssetTradingEnv(gym.Env):
 
         return self._get_observation(), reward, terminated, truncated, {
             "portfolio_value": self.portfolio_value,
-            "turnover": np.sum(trade_sizes),
-            "fee": fee,
-            "slippage": slippage_cost
+            "turnover": float(np.sum(trade_sizes)),
+            "fee": float(fee),
+            "slippage": float(slippage_cost)
         }
