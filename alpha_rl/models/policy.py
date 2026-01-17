@@ -3,7 +3,10 @@ import torch.nn as nn
 from torch.distributions.normal import Normal
 from typing import Tuple
 
-def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
+LOG_STD_MIN = -20.0
+LOG_STD_MAX = 2.0
+
+def layer_init(layer, std=1.414, bias_const=0.0):
     import numpy as np
     nn.init.orthogonal_(layer.weight, std)
     nn.init.constant_(layer.bias, bias_const)
@@ -12,7 +15,6 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 class GaussianActor(nn.Module):
     def __init__(self, obs_dim: int, action_dim: int, hidden_dim: int = 128):
         super().__init__()
-        import numpy as np
         self.net = nn.Sequential(
             layer_init(nn.Linear(obs_dim, hidden_dim)),
             nn.Tanh(),
@@ -24,13 +26,14 @@ class GaussianActor(nn.Module):
 
     def forward(self, x: torch.Tensor) -> Normal:
         mean = torch.sigmoid(self.net(x))
-        std = self.log_std.exp().expand_as(mean)
+        # Prevent numerical explosion or degenerate zero variances
+        clamped_log_std = torch.clamp(self.log_std, LOG_STD_MIN, LOG_STD_MAX)
+        std = clamped_log_std.exp().expand_as(mean)
         return Normal(mean, std)
 
 class ValueCritic(nn.Module):
     def __init__(self, obs_dim: int, hidden_dim: int = 128):
         super().__init__()
-        import numpy as np
         self.net = nn.Sequential(
             layer_init(nn.Linear(obs_dim, hidden_dim)),
             nn.Tanh(),
