@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Tuple, Any
 class MultiAssetTradingEnv(gym.Env):
     """
     Gymnasium multi-asset continuous portfolio allocation environment.
-    Supports continuous action space with softmax simplex projection and optional cash holding.
+    Supports Differential Sharpe Ratio (Moody & Saffell) and Downside Sortino reward modes.
     """
     metadata = {"render_modes": ["human"]}
 
@@ -21,7 +21,8 @@ class MultiAssetTradingEnv(gym.Env):
         taker_fee: float = 0.0005,
         slippage_lambda: float = 1e-7,
         cash_buffer_pct: float = 0.01,
-        allow_short: bool = False
+        reward_mode: str = "differential_sharpe",
+        eta_sharpe: float = 0.05
     ):
         super().__init__()
         self.assets = sorted(list(market_data.keys()))
@@ -34,13 +35,17 @@ class MultiAssetTradingEnv(gym.Env):
         self.taker_fee = taker_fee
         self.slippage_lambda = slippage_lambda
         self.cash_buffer_pct = cash_buffer_pct
-        self.allow_short = allow_short
+        self.reward_mode = reward_mode
+        self.eta_sharpe = eta_sharpe
+
+        # Exponential moving averages for Differential Sharpe Ratio
+        self.a_t = 0.0
+        self.b_t = 0.0
 
         self.n_features = feature_data[self.assets[0]].shape[1]
         self.n_bars = len(market_data[self.assets[0]])
 
-        # Action: N asset allocations (+1 implicit for cash)
-        self.action_space = spaces.Box(low=-1.0 if allow_short else 0.0, high=1.0, shape=(self.n_assets,), dtype=np.float32)
+        self.action_space = spaces.Box(low=0.0, high=1.0, shape=(self.n_assets,), dtype=np.float32)
         obs_dim = (self.window_size * self.n_assets * self.n_features) + self.n_assets + 1
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32)
 
@@ -57,6 +62,8 @@ class MultiAssetTradingEnv(gym.Env):
         self.cash = self.initial_balance
         self.holdings = np.zeros(self.n_assets, dtype=np.float64)
         self.weights = np.zeros(self.n_assets, dtype=np.float64)
+        self.a_t = 0.0
+        self.b_t = 0.0
         return self._get_observation(), {}
 
     def _get_prices(self, step: int) -> np.ndarray:
@@ -80,17 +87,11 @@ class MultiAssetTradingEnv(gym.Env):
         prices = self._get_prices(self.current_step)
         volumes = self._get_volumes(self.current_step)
         
-        if not self.allow_short:
-            action = np.clip(action, 0.0, 1.0)
-            max_alloc = 1.0 - self.cash_buffer_pct
-            total_weight = np.sum(action)
-            if total_weight > max_alloc:
-                action = action * (max_alloc / total_weight)
-        else:
-            action = np.clip(action, -1.0, 1.0)
-            total_abs = np.sum(np.abs(action))
-            if total_abs > 1.0:
-                action = action / total_abs
+        action = np.clip(action, 0.0, 1.0)
+        max_alloc = 1.0 - self.cash_buffer_pct
+        total_weight = np.sum(action)
+        if total_weight > max_alloc:
+            action = action * (max_alloc / total_weight)
 
         target_values = action * self.portfolio_value
         target_holdings = target_values / prices
@@ -109,7 +110,22 @@ class MultiAssetTradingEnv(gym.Env):
 
         next_prices = self._get_prices(self.current_step)
         new_val = self.cash + np.sum(self.holdings * next_prices)
-        reward = float(np.log(max(new_val, 1e-6) / max(self.portfolio_value, 1e-6)))
+        simple_ret = (new_val - self.portfolio_value) / max(self.portfolio_value, 1e-6)
+
+        if self.reward_mode == "differential_sharpe":
+            # Differential Sharpe Ratio formulation (Moody & Saffell 1998)
+            delta_a = simple_ret - self.a_t
+            delta_b = (simple_ret ** 2) - self.b_t
+            var_term = max(self.b_t - (self.a_t ** 2), 1e-6)
+            dsr = (self.b_t * delta_a - 0.5 * self.a_t * delta_b) / (var_term ** 1.5)
+            reward = float(np.clip(dsr, -5.0, 5.0))
+            self.a_t += self.eta_sharpe * delta_a
+            self.b_t += self.eta_sharpe * delta_b
+        elif self.reward_mode == "downside_sortino":
+            downside = min(0.0, simple_ret) ** 2
+            reward = float(simple_ret - 2.0 * downside)
+        else:
+            reward = float(np.log(max(new_val, 1e-6) / max(self.portfolio_value, 1e-6)))
 
         self.portfolio_value = new_val
         self.weights = (self.holdings * next_prices) / max(self.portfolio_value, 1e-6)
