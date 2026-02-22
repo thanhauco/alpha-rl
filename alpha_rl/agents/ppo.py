@@ -6,7 +6,7 @@ from typing import List, Dict, Optional, Tuple
 from alpha_rl.models.policy import ActorCritic
 
 class PPOAgent:
-    """Proximal Policy Optimization with Generalized Advantage Estimation (GAE)."""
+    """Proximal Policy Optimization with tuned entropy bonus for exploration."""
     def __init__(
         self,
         obs_dim: int,
@@ -64,7 +64,6 @@ class PPOAgent:
         batch_size: int = 64
     ) -> Dict[str, float]:
         n_samples = obs_b.size(0)
-        # Normalize advantages
         adv_b = (adv_b - adv_b.mean()) / (adv_b.std() + 1e-8)
 
         total_loss, pg_loss, v_loss = 0.0, 0.0, 0.0
@@ -80,13 +79,11 @@ class PPOAgent:
                 logratio = new_logprob - logprob_b[idx]
                 ratio = logratio.exp()
 
-                # Policy loss
                 mb_adv = adv_b[idx]
                 pg_loss1 = -mb_adv * ratio
                 pg_loss2 = -mb_adv * torch.clamp(ratio, 1.0 - self.clip_coef, 1.0 + self.clip_coef)
                 mb_pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
-                # Value loss with clipping
                 v_loss_unclipped = (new_value - ret_b[idx]) ** 2
                 v_clipped = val_b[idx] + torch.clamp(new_value - val_b[idx], -self.clip_coef, self.clip_coef)
                 v_loss_clipped = (v_clipped - ret_b[idx]) ** 2
