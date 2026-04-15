@@ -5,7 +5,7 @@ class RiskManager:
     """
     Institutional Risk Management Layer:
     - Maximum Drawdown circuit breaker
-    - Volatility targeting
+    - Volatility targeting with robust epsilon guards
     - Value-at-Risk (VaR 95%, 99%) & Conditional VaR (Expected Shortfall)
     """
     def __init__(
@@ -30,18 +30,18 @@ class RiskManager:
         return drawdown
 
     def calculate_volatility_scaler(self, realized_vol: float) -> float:
-        if realized_vol <= 0.0:
-            return 1.0
-        scaler = self.target_volatility / realized_vol
+        # Guard against zero or near-zero volatility to avoid division overflow
+        safe_vol = max(realized_vol, 1e-4)
+        scaler = self.target_volatility / safe_vol
         return float(np.clip(scaler, 0.1, self.max_leverage))
 
     def calculate_var_cvar(self, returns: np.ndarray, alpha: float = 0.05) -> Tuple[float, float]:
         if len(returns) < 10:
             return 0.0, 0.0
         sorted_rets = np.sort(returns)
-        idx = int(alpha * len(sorted_rets))
+        idx = max(1, int(alpha * len(sorted_rets)))
         var = -sorted_rets[idx]
-        cvar = -np.mean(sorted_rets[:idx]) if idx > 0 else var
+        cvar = -np.mean(sorted_rets[:idx])
         return float(var), float(cvar)
 
     def check_allocation(self, raw_weights: np.ndarray, current_val: float, realized_vol: float = 0.12) -> np.ndarray:
@@ -51,7 +51,6 @@ class RiskManager:
         
         scaler = self.calculate_volatility_scaler(realized_vol)
         scaled_weights = raw_weights * scaler
-        # Renormalize to ensure sum <= 1.0
         total_w = np.sum(np.abs(scaled_weights))
         if total_w > 1.0:
             scaled_weights = scaled_weights / total_w
