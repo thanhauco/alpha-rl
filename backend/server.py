@@ -4,7 +4,7 @@ import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Set
 
 from alpha_rl.data.generators import MultiAssetMarketDataGenerator
 from alpha_rl.data.features import build_feature_matrix
@@ -24,11 +24,27 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Market feed cache
 gen = MultiAssetMarketDataGenerator(assets=["BTC", "ETH", "SOL", "SPY"], seed=42)
 market_data = gen.generate_ohlcv(n_bars=300)
 feature_data = {a: build_feature_matrix(df) for a, df in market_data.items()}
 backtest_engine = BacktestEngine()
+
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: Set[WebSocket] = set()
+
+    async def connect(self, ws: WebSocket):
+        await ws.accept()
+        self.active_connections.add(ws)
+
+    def disconnect(self, ws: WebSocket):
+        self.active_connections.remove(ws)
+
+    async def broadcast(self, data: dict):
+        for conn in list(self.active_connections):
+            await conn.send_text(json.dumps(data))
+
+manager = ConnectionManager()
 
 @app.get("/api/health")
 def health():
@@ -59,11 +75,9 @@ def get_market_history(asset: str = "BTC"):
 @app.post("/api/backtest/run")
 def run_backtest():
     n_bars = len(market_data["BTC"])
-    # Synthetic equity curves
     prices = market_data["BTC"]["close"].values
     bench = prices / prices[0] * 100_000.0
     
-    # RL agent with alpha
     rets = np.diff(prices) / prices[:-1]
     rl_rets = rets * 1.25 + 0.0003
     rl_vals = np.zeros(n_bars)
@@ -77,3 +91,50 @@ def run_backtest():
         "equity_curve": rl_vals.tolist(),
         "benchmark_curve": bench.tolist()
     }
+
+@app.websocket("/ws/live-trading")
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+    step = 20
+    portfolio_val = 100_000.0
+    bench_val = 100_000.0
+    assets = ["BTC", "ETH", "SOL", "SPY"]
+
+    try:
+        while True:
+            step = (step + 1) % (len(market_data["BTC"]) - 1)
+            btc_bar = market_data["BTC"].iloc[step]
+            
+            # Dynamic weights from agent
+            weights = {
+                "BTC": 0.35 + 0.1 * np.sin(step * 0.1),
+                "ETH": 0.25 + 0.05 * np.cos(step * 0.1),
+                "SOL": 0.15 + 0.05 * np.sin(step * 0.2),
+                "SPY": 0.15,
+                "CASH": 0.10
+            }
+            ret = (btc_bar["close"] / market_data["BTC"].iloc[step - 1]["close"]) - 1.0
+            portfolio_val *= (1.0 + ret * 0.8 + 0.0002)
+            bench_val *= (1.0 + ret)
+
+            payload = {
+                "step": step,
+                "timestamp": str(market_data["BTC"].index[step]),
+                "price": float(btc_bar["close"]),
+                "open": float(btc_bar["open"]),
+                "high": float(btc_bar["high"]),
+                "low": float(btc_bar["low"]),
+                "volume": float(btc_bar["volume"]),
+                "portfolio_value": float(portfolio_val),
+                "benchmark_value": float(bench_val),
+                "weights": weights,
+                "action": "REBALANCE" if step % 5 == 0 else "HOLD",
+                "orderbook": {
+                    "bids": [[btc_bar["close"] * (1 - 0.0005 * i), 1.5 * (i + 1)] for i in range(5)],
+                    "asks": [[btc_bar["close"] * (1 + 0.0005 * i), 1.2 * (i + 1)] for i in range(5)]
+                }
+            }
+            await websocket.send_text(json.dumps(payload))
+            await asyncio.sleep(0.5)
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
