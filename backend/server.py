@@ -38,11 +38,15 @@ class ConnectionManager:
         self.active_connections.add(ws)
 
     def disconnect(self, ws: WebSocket):
-        self.active_connections.remove(ws)
+        if ws in self.active_connections:
+            self.active_connections.remove(ws)
 
     async def broadcast(self, data: dict):
         for conn in list(self.active_connections):
-            await conn.send_text(json.dumps(data))
+            try:
+                await conn.send_text(json.dumps(data))
+            except Exception:
+                self.disconnect(conn)
 
 manager = ConnectionManager()
 
@@ -105,11 +109,10 @@ async def websocket_endpoint(websocket: WebSocket):
             step = (step + 1) % (len(market_data["BTC"]) - 1)
             btc_bar = market_data["BTC"].iloc[step]
             
-            # Dynamic weights from agent
             weights = {
-                "BTC": 0.35 + 0.1 * np.sin(step * 0.1),
-                "ETH": 0.25 + 0.05 * np.cos(step * 0.1),
-                "SOL": 0.15 + 0.05 * np.sin(step * 0.2),
+                "BTC": float(np.clip(0.35 + 0.1 * np.sin(step * 0.1), 0.05, 0.6)),
+                "ETH": float(np.clip(0.25 + 0.05 * np.cos(step * 0.1), 0.05, 0.4)),
+                "SOL": float(np.clip(0.15 + 0.05 * np.sin(step * 0.2), 0.05, 0.3)),
                 "SPY": 0.15,
                 "CASH": 0.10
             }
@@ -130,11 +133,13 @@ async def websocket_endpoint(websocket: WebSocket):
                 "weights": weights,
                 "action": "REBALANCE" if step % 5 == 0 else "HOLD",
                 "orderbook": {
-                    "bids": [[btc_bar["close"] * (1 - 0.0005 * i), 1.5 * (i + 1)] for i in range(5)],
-                    "asks": [[btc_bar["close"] * (1 + 0.0005 * i), 1.2 * (i + 1)] for i in range(5)]
+                    "bids": [[round(float(btc_bar["close"] * (1 - 0.0004 * i)), 2), round(1.5 * (i + 1), 3)] for i in range(5)],
+                    "asks": [[round(float(btc_bar["close"] * (1 + 0.0004 * i)), 2), round(1.2 * (i + 1), 3)] for i in range(5)]
                 }
             }
             await websocket.send_text(json.dumps(payload))
-            await asyncio.sleep(0.5)
-    except WebSocketDisconnect:
+            await asyncio.sleep(0.4)
+    except (WebSocketDisconnect, asyncio.CancelledError):
+        manager.disconnect(websocket)
+    except Exception:
         manager.disconnect(websocket)
