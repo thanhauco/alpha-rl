@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useRef } from "react";
-import { CandlestickChart, Candle } from "./components/CandlestickChart";
+import { useState, useEffect } from "react";
+import { CandlestickChart, type Candle } from "./components/CandlestickChart";
 import { EquityChart } from "./components/EquityChart";
 import { PortfolioRadar } from "./components/PortfolioRadar";
 import { OrderBookVisualizer } from "./components/OrderBookVisualizer";
@@ -31,8 +31,6 @@ export default function App() {
     dailyPnL: 1.84,
     totalValue: 100000
   });
-
-  const wsRef = useRef<WebSocket | null>(null);
 
   // Initialize synthetic candle history
   useEffect(() => {
@@ -103,6 +101,14 @@ export default function App() {
         });
 
         // Dynamic orderbook & weights
+        setWeights({
+          BTC: Math.max(0.1, 0.40 + 0.05 * Math.sin(Date.now() / 3000)),
+          ETH: Math.max(0.05, 0.25 + 0.04 * Math.cos(Date.now() / 4000)),
+          SOL: Math.max(0.05, 0.15 + 0.03 * Math.sin(Date.now() / 5000)),
+          SPY: 0.10,
+          CASH: 0.10
+        });
+
         setOrderbook({
           bids: [
             [newPrice * 0.9995, 2.4 + Math.random()],

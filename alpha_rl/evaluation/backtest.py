@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from typing import List, Tuple, Generator, Dict, Any
+from typing import List, Tuple, Generator, Dict, Any, Optional
 
 def purged_and_embargoed_kfold(
     n_samples: int,
